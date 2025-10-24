@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <string>
 #include <vector>
 #include <sdbus-c++/sdbus-c++.h>
 #include <hyprutils/os/FileDescriptor.hpp>
@@ -26,6 +28,7 @@ class CHypridle {
     struct SDbusInhibitCookie {
         uint32_t    cookie = 0;
         std::string app, reason, ownerID;
+        bool        ignored = false;
     };
 
     void               run();
@@ -44,7 +47,7 @@ class CHypridle {
     SDbusInhibitCookie getDbusInhibitCookie(uint32_t cookie);
     void               registerDbusInhibitCookie(SDbusInhibitCookie& cookie);
     bool               unregisterDbusInhibitCookie(const SDbusInhibitCookie& cookie);
-    bool               unregisterDbusInhibitCookies(const std::string& ownerID);
+    size_t             unregisterDbusInhibitCookies(const std::string& ownerID);
 
     void               handleInhibitOnDbusSleep(bool toSleep);
     void               inhibitSleep();
@@ -53,6 +56,9 @@ class CHypridle {
   private:
     void    setupDBUS();
     void    enterEventLoop();
+    void    loadIgnoredInhibitApps();
+    bool    isInhibitAppIgnored(const std::string& app) const;
+    friend uint32_t handleDbusScreensaver(std::string app, std::string reason, uint32_t cookie, bool inhibit, const char* sender);
 
     bool    m_bTerminate    = false;
     bool    isIdled         = false;
@@ -95,6 +101,8 @@ class CHypridle {
         std::mutex              loopRequestMutex;
         std::mutex              eventLock;
     } m_sEventLoopInternals;
+
+    std::vector<std::string> m_ignoredInhibitApps;
 };
 
 inline std::unique_ptr<CHypridle> g_pHypridle;

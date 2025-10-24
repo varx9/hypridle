@@ -49,6 +49,7 @@ void CConfigManager::init() {
     m_config.addConfigValue("general:ignore_dbus_inhibit", Hyprlang::INT{0});
     m_config.addConfigValue("general:ignore_systemd_inhibit", Hyprlang::INT{0});
     m_config.addConfigValue("general:ignore_wayland_inhibit", Hyprlang::INT{0});
+    m_config.addConfigValue("general:ignore_dbus_inhibit_apps", Hyprlang::STRING{""});
     m_config.addConfigValue("general:inhibit_sleep", Hyprlang::INT{2});
 
     // track the file in the circular dependency chain

@@ -19,6 +19,7 @@ general {
     after_sleep_cmd = notify-send "Awake!"  # command ran after sleep
     ignore_dbus_inhibit = false             # whether to ignore dbus-sent idle-inhibit requests (used by e.g. firefox or steam)
     ignore_systemd_inhibit = false          # whether to ignore systemd-inhibit --what=idle inhibitors
+    ignore_dbus_inhibit_apps = moonlight    # comma-separated list of apps to ignore dbus inhibit requests from (e.g., "app1,app2,app3")
 }
 
 listener {

@@ -9,9 +9,29 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <algorithm>
+#include <cctype>
+#include <sstream>
 #include <thread>
 #include <mutex>
 #include <hyprutils/os/Process.hpp>
+
+namespace {
+
+std::string trimString(const std::string& value) {
+    const auto START = value.find_first_not_of(" \t\n\r");
+    if (START == std::string::npos)
+        return "";
+
+    const auto END = value.find_last_not_of(" \t\n\r");
+    return value.substr(START, END - START + 1);
+}
+
+std::string toLowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+} // namespace
 
 CHypridle::CHypridle() {
     m_sWaylandState.display = wl_display_connect(nullptr);
@@ -136,10 +156,54 @@ void CHypridle::run() {
         case SLEEP_INHIBIT_LOCK_NOTIFY: Debug::log(LOG, "Sleep inhibition enabled - inhibiting until the wayland session gets locked"); break;
     }
 
+    loadIgnoredInhibitApps();
+
     setupDBUS();
     if (m_inhibitSleepBehavior != SLEEP_INHIBIT_NONE)
         inhibitSleep();
     enterEventLoop();
+}
+
+void CHypridle::loadIgnoredInhibitApps() {
+    m_ignoredInhibitApps.clear();
+
+    static const auto IGNOREDAPPS = g_pConfigManager->getValue<Hyprlang::STRING>("general:ignore_dbus_inhibit_apps");
+    std::string       raw         = *IGNOREDAPPS;
+
+    if (raw.empty())
+        return;
+
+    std::stringstream stream(raw);
+    std::string       item;
+
+    while (std::getline(stream, item, ',')) {
+        const auto trimmed = trimString(item);
+        if (trimmed.empty())
+            continue;
+
+        m_ignoredInhibitApps.emplace_back(toLowerCopy(trimmed));
+    }
+
+    if (!m_ignoredInhibitApps.empty()) {
+        std::string appsList;
+        for (size_t i = 0; i < m_ignoredInhibitApps.size(); ++i) {
+            if (i > 0)
+                appsList += ", ";
+
+            appsList += m_ignoredInhibitApps[i];
+        }
+
+        Debug::log(LOG, "Ignoring DBus inhibitors from applications: {}", appsList);
+    }
+}
+
+bool CHypridle::isInhibitAppIgnored(const std::string& app) const {
+    const auto trimmed = trimString(app);
+    if (trimmed.empty())
+        return false;
+
+    const auto lowered = toLowerCopy(trimmed);
+    return std::find(m_ignoredInhibitApps.begin(), m_ignoredInhibitApps.end(), lowered) != m_ignoredInhibitApps.end();
 }
 
 void CHypridle::enterEventLoop() {
@@ -371,15 +435,25 @@ bool CHypridle::unregisterDbusInhibitCookie(const CHypridle::SDbusInhibitCookie&
     return true;
 }
 
-bool CHypridle::unregisterDbusInhibitCookies(const std::string& ownerID) {
+size_t CHypridle::unregisterDbusInhibitCookies(const std::string& ownerID) {
+    size_t removedActive = 0;
+
     const auto IT = std::remove_if(m_sDBUSState.inhibitCookies.begin(), m_sDBUSState.inhibitCookies.end(),
-                                   [&ownerID](const CHypridle::SDbusInhibitCookie& item) { return item.ownerID == ownerID; });
+                                   [&ownerID, &removedActive](const CHypridle::SDbusInhibitCookie& item) {
+                                       if (item.ownerID != ownerID)
+                                           return false;
+
+                                       if (!item.ignored)
+                                           ++removedActive;
+
+                                       return true;
+                                   });
 
     if (IT == m_sDBUSState.inhibitCookies.end())
-        return false;
+        return 0;
 
     m_sDBUSState.inhibitCookies.erase(IT, m_sDBUSState.inhibitCookies.end());
-    return true;
+    return removedActive;
 }
 
 static void handleDbusLogin(sdbus::Message msg) {
@@ -459,7 +533,7 @@ static void handleDbusBlockInhibitsPropertyChanged(sdbus::Message msg) {
     }
 }
 
-static uint32_t handleDbusScreensaver(std::string app, std::string reason, uint32_t cookie, bool inhibit, const char* sender) {
+uint32_t handleDbusScreensaver(std::string app, std::string reason, uint32_t cookie, bool inhibit, const char* sender) {
     std::string ownerID = sender;
 
     if (!inhibit) {
@@ -474,20 +548,26 @@ static uint32_t handleDbusScreensaver(std::string app, std::string reason, uint3
 
             if (!g_pHypridle->unregisterDbusInhibitCookie(COOKIE))
                 Debug::log(WARN, "BUG THIS: attempted to unregister unknown cookie");
+            else if (!COOKIE.ignored)
+                g_pHypridle->onInhibit(false);
         }
+        Debug::log(LOG, "ScreenSaver inhibit: {} dbus message from {} (owner: {}) with content {}", inhibit, app, ownerID, reason);
+        return 0;
     }
+
+    const bool IGNORE_APP = g_pHypridle->isInhibitAppIgnored(app);
 
     Debug::log(LOG, "ScreenSaver inhibit: {} dbus message from {} (owner: {}) with content {}", inhibit, app, ownerID, reason);
 
-    if (inhibit)
-        g_pHypridle->onInhibit(true);
+    if (IGNORE_APP)
+        Debug::log(LOG, "Ignoring inhibit request from {} (owner: {}) due to configuration", app, ownerID);
     else
-        g_pHypridle->onInhibit(false);
+        g_pHypridle->onInhibit(true);
 
     static uint32_t cookieID = 1337;
 
     if (inhibit) {
-        auto cookie = CHypridle::SDbusInhibitCookie{.cookie = cookieID, .app = app, .reason = reason, .ownerID = ownerID};
+        auto cookie = CHypridle::SDbusInhibitCookie{.cookie = cookieID, .app = app, .reason = reason, .ownerID = ownerID, .ignored = IGNORE_APP};
 
         Debug::log(LOG, "Cookie {} sent", cookieID);
 
@@ -506,9 +586,11 @@ static void handleDbusNameOwnerChanged(sdbus::Message msg) {
     if (!newOwner.empty())
         return;
 
-    if (g_pHypridle->unregisterDbusInhibitCookies(oldOwner)) {
+    const auto removedActive = g_pHypridle->unregisterDbusInhibitCookies(oldOwner);
+    if (removedActive > 0) {
         Debug::log(LOG, "App with owner {} disconnected", oldOwner);
-        g_pHypridle->onInhibit(false);
+        for (size_t i = 0; i < removedActive; ++i)
+            g_pHypridle->onInhibit(false);
     }
 }
 
